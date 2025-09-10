@@ -1,196 +1,302 @@
 import asyncio
 import logging
 import os
-from contextlib import suppress
+import tempfile
 from pathlib import Path
+from typing import Optional
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
-from aiogram.types import Message, FSInputFile, Video
-from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import Command
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Message, BufferedInputFile
+import aiofiles
 
-from .config import get_settings
-from .utils.audio import run_extract_audio, ExtractionError
 from .utils.downloader import download_video, DownloadError
-from .utils.logging import setup_logging
+from .utils.audio import extract_audio_ffmpeg, DownloadError as AudioError
+from .config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE
 
-
-setup_logging()
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher(storage=MemoryStorage())
 
-dp = Dispatcher()
+@dp.message(Command("start"))
+async def start_handler(message: Message):
+    """Обработчик команды /start"""
+    welcome_text = (
+        "🎵 <b>Привет! Я бот для извлечения аудио из видео</b>\n\n"
+        "📹 Отправь мне:\n"
+        "• Ссылку на видео (YouTube, Yandex Disk, прямые ссылки)\n"
+        "• Или загрузи видеофайл напрямую\n\n"
+        "🎧 Я извлеку аудио и отправлю тебе MP3 файл\n\n"
+        "ℹ️ Поддерживаемые платформы:\n"
+        "✅ YouTube\n"
+        "✅ Yandex Disk\n" 
+        "✅ Прямые ссылки на видео\n"
+        "✅ Загруженные файлы\n\n"
+        "❌ Для VK, Instagram, TikTok - загружай файлы напрямую"
+    )
+    await message.answer(welcome_text)
 
+@dp.message(Command("help"))
+async def help_handler(message: Message):
+    """Обработчик команды /help"""
+    help_text = (
+        "🆘 <b>Помощь</b>\n\n"
+        "<b>Как использовать:</b>\n"
+        "1. Отправь ссылку на видео или загрузи файл\n"
+        "2. Дождись обработки\n"
+        "3. Получи MP3 файл\n\n"
+        "<b>Ограничения:</b>\n"
+        f"• Максимальный размер файла: {MAX_FILE_SIZE // (1024*1024)} МБ\n"
+        "• Время обработки зависит от размера видео\n\n"
+        "<b>Команды:</b>\n"
+        "/start - Начать работу\n"
+        "/help - Показать эту справку"
+    )
+    await message.answer(help_text)
 
-@dp.message(CommandStart())
-async def start_handler(message: Message) -> None:
-	await message.answer(
-		"Отправьте ссылку на видео (Яндекс.Диск, Mail, прямые ссылки) или загрузите видеофайл напрямую. Я извлеку аудио и пришлю файл.")
+@dp.message(lambda message: message.text and (
+    message.text.startswith('http://') or 
+    message.text.startswith('https://')
+))
+async def url_handler(message: Message):
+    """Обработчик URL ссылок"""
+    url = message.text.strip()
+    logger.info(f"Processing URL: {url}")
+    
+    # Отправляем начальное сообщение
+    status_msg = await message.answer("🔍 Анализ ссылки...")
+    
+    try:
+        # Создаем временную директорию для этого пользователя
+        user_temp_dir = os.path.join(TEMP_DIR, f"user_{message.from_user.id}")
+        os.makedirs(user_temp_dir, exist_ok=True)
+        
+        # Callback для отслеживания прогресса
+        async def on_progress(stage: str, percent: float = 0):
+            try:
+                text = f"{stage}"
+                if percent > 0:
+                    text += f" {percent:.1f}%"
+                
+                await status_msg.edit_text(text)
+                
+            except Exception as e:
+                logger.warning(f"Progress update failed: {e}")
+        
+        # Скачиваем видео
+        await on_progress("📥 Скачивание видео...")
+        video_path, title = await download_video(url, user_temp_dir, on_progress)
+        
+        # Извлекаем аудио
+        await on_progress("🎵 Извлечение аудио...")
+        audio_path = await extract_audio_ffmpeg(video_path, user_temp_dir)
+        
+        # Проверяем размер файла
+        audio_size = os.path.getsize(audio_path)
+        if audio_size > MAX_FILE_SIZE:
+            await status_msg.edit_text(
+                f"❌ Файл слишком большой ({audio_size // (1024*1024)} МБ). "
+                f"Максимум: {MAX_FILE_SIZE // (1024*1024)} МБ"
+            )
+            return
+        
+        # Отправляем аудио файл
+        await on_progress("📤 Отправка файла...")
+        
+        # Читаем файл
+        async with aiofiles.open(audio_path, 'rb') as audio_file:
+            audio_data = await audio_file.read()
+        
+        # Формируем имя файла
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+        filename = f"{safe_title[:50]}.mp3" if safe_title else "audio.mp3"
+        
+        # Отправляем аудио
+        audio_file = BufferedInputFile(audio_data, filename=filename)
+        await message.answer_audio(
+            audio=audio_file,
+            title=title,
+            caption=f"🎵 <b>{title}</b>\n\n📊 Размер: {audio_size // 1024} КБ"
+        )
+        
+        # Удаляем статусное сообщение
+        await status_msg.delete()
+        
+    except DownloadError as e:
+        logger.error(f"Download error: {e}")
+        await status_msg.edit_text(f"❌ Ошибка скачивания:\n{str(e)}")
+    except AudioError as e:
+        logger.error(f"Audio extraction error: {e}")
+        await status_msg.edit_text(f"❌ Ошибка извлечения аудио:\n{str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        await status_msg.edit_text("❌ Произошла неожиданная ошибка")
+    finally:
+        # Очищаем временные файлы
+        try:
+            import shutil
+            if os.path.exists(user_temp_dir):
+                shutil.rmtree(user_temp_dir)
+        except Exception as e:
+            logger.warning(f"Cleanup failed: {e}")
 
-
-@dp.message(F.text.func(lambda t: t and t.startswith("http")))
-async def link_handler(message: Message) -> None:
-	url = message.text.strip()
-	status_msg = await message.answer("🔎 Получаю ссылку и начинаю загрузку...")
-	temp_dir = Path(settings.temp_dir)
-
-	video_result = None
-	try:
-		video_result = await download_video(url, temp_dir=temp_dir, max_size_mb=settings.max_file_size_mb, yadisk_token=settings.yadisk_token)
-		await status_msg.edit_text("📥 Видео загружено. Извлекаю аудио через ffmpeg...")
-
-		progress_last = ""
-
-		def on_progress(stage: str, percent):
-			nonlocal progress_last
-			text = "🎵 Обработка аудио..." if stage == "processing" else "✅ Завершаю..."
-			if text != progress_last:
-				progress_last = text
-				# Schedule the coroutine to run in the background
-				loop = asyncio.get_event_loop()
-				coro = status_msg.edit_text(text)
-				loop.create_task(coro)
-
-		result = await run_extract_audio(
-			video_result.file_path,
-			temp_dir,
-			ffmpeg_path=settings.ffmpeg_path,
-			format="mp3",
-			bitrate="192k",
-			progress_cb=on_progress,
-		)
-
-		await status_msg.edit_text("📤 Отправляю аудиофайл пользователю...")
-		audio_file = FSInputFile(result.output_path)
-		await message.answer_document(audio_file, caption="Готово! 🎧")
-		await status_msg.edit_text("✅ Готово. Удаляю временные файлы...")
-
-	except DownloadError as e:
-		logger.exception("Download failed")
-		error_msg = str(e)
-		if "Sign in to confirm you're not a bot" in error_msg:
-			await status_msg.edit_text("❌ YouTube заблокировал доступ. Попробуйте другой источник или загрузите видео напрямую.")
-		elif "Unsupported URL" in error_msg:
-			await status_msg.edit_text("❌ Неподдерживаемый тип ссылки. Попробуйте прямую ссылку на видео или загрузите файл напрямую.")
-		elif "cloud.mail.ru" in url or "Mail.ru Cloud requires authentication" in error_msg:
-			await status_msg.edit_text(
-				"❌ Mail.ru Cloud требует авторизации.\n\n"
-				"Поддерживаемые платформы:\n"
-				"✅ YouTube (большинство видео)\n"
-				"✅ Yandex Disk публичные ссылки\n"
-				"✅ Прямые ссылки на видео\n"
-				"❌ Mail.ru (требует авторизации)\n"
-				"❌ VK (требует cookies/логин)\n"
-				"❌ Instagram (требует cookies)\n"
-				"❌ TikTok (IP ограничения)\n"
-				"❌ Rutube (нестабильно)\n\n"
-				"Попробуйте загрузить видеофайл напрямую в бота."
-			)
-		elif "rutube" in url:
-			await status_msg.edit_text("❌ Rutube ссылка недоступна. Попробуйте другую ссылку или загрузите видео напрямую.")
-		else:
-			await status_msg.edit_text(f"❌ Ошибка загрузки: {e}")
-		return
-	except ExtractionError as e:
-		logger.exception("Extraction failed")
-		await status_msg.edit_text(f"❌ Ошибка извлечения аудио: {e}")
-		return
-	except Exception as e:
-		logger.exception("Unexpected error")
-		await status_msg.edit_text("❌ Непредвиденная ошибка. Попробуйте позже.")
-		return
-	finally:
-		# Cleanup video and possibly audio after sending
-		with suppress(Exception):
-			if video_result and video_result.file_path.exists():
-				video_result.file_path.unlink()
-		await asyncio.sleep(0.1)
-
-
-@dp.message(F.video)
-async def video_handler(message: Message, bot: Bot) -> None:
-	"""Handle direct video file uploads"""
-	video: Video = message.video
-	status_msg = await message.answer("📥 Получил видеофайл. Скачиваю...")
-	temp_dir = Path(settings.temp_dir)
-	
-	try:
-		# Download video file from Telegram
-		file_info = await bot.get_file(video.file_id)
-		video_path = temp_dir / f"uploaded_{video.file_id}.mp4"
-		temp_dir.mkdir(parents=True, exist_ok=True)
-		
-		await bot.download_file(file_info.file_path, video_path)
-		
-		# Check file size
-		if video_path.stat().st_size > settings.max_file_size_mb * 1024 * 1024:
-			await status_msg.edit_text("❌ Видеофайл слишком большой")
-			video_path.unlink(missing_ok=True)
-			return
-		
-		await status_msg.edit_text("🎵 Извлекаю аудио из загруженного видео...")
-		
-		progress_last = ""
-		def on_progress(stage: str, percent):
-			nonlocal progress_last
-			text = "🎵 Обработка аудио..." if stage == "processing" else "✅ Завершаю..."
-			if text != progress_last:
-				progress_last = text
-				# Schedule the coroutine to run in the background
-				loop = asyncio.get_event_loop()
-				coro = status_msg.edit_text(text)
-				loop.create_task(coro)
-		
-		result = await run_extract_audio(
-			video_path,
-			temp_dir,
-			ffmpeg_path=settings.ffmpeg_path,
-			format="mp3",
-			bitrate="192k",
-			progress_cb=on_progress,
-		)
-		
-		await status_msg.edit_text("📤 Отправляю аудиофайл...")
-		audio_file = FSInputFile(result.output_path)
-		await message.answer_document(audio_file, caption="Готово! 🎧")
-		await status_msg.edit_text("✅ Готово. Удаляю временные файлы...")
-		
-	except Exception as e:
-		logger.exception("Video processing failed")
-		await status_msg.edit_text("❌ Ошибка обработки видео")
-	finally:
-		# Cleanup
-		with suppress(Exception):
-			if 'video_path' in locals() and video_path.exists():
-				video_path.unlink()
-		await asyncio.sleep(0.1)
-
+@dp.message(lambda message: message.video or message.document)
+async def video_handler(message: Message):
+    """Обработчик видео файлов и документов"""
+    logger.info(f"Processing uploaded file from user {message.from_user.id}")
+    
+    # Определяем тип файла
+    file_obj = message.video or message.document
+    
+    if not file_obj:
+        await message.answer("❌ Файл не найден")
+        return
+    
+    # Проверяем размер файла
+    if file_obj.file_size and file_obj.file_size > MAX_FILE_SIZE:
+        await message.answer(
+            f"❌ Файл слишком большой ({file_obj.file_size // (1024*1024)} МБ). "
+            f"Максимум: {MAX_FILE_SIZE // (1024*1024)} МБ"
+        )
+        return
+    
+    # Отправляем начальное сообщение
+    status_msg = await message.answer("📥 Загрузка файла...")
+    
+    try:
+        # Создаем временную директорию
+        user_temp_dir = os.path.join(TEMP_DIR, f"user_{message.from_user.id}")
+        os.makedirs(user_temp_dir, exist_ok=True)
+        
+        # Callback для отслеживания прогресса
+        async def on_progress(stage: str, percent: float = 0):
+            try:
+                text = f"{stage}"
+                if percent > 0:
+                    text += f" {percent:.1f}%"
+                
+                await status_msg.edit_text(text)
+                
+            except Exception as e:
+                logger.warning(f"Progress update failed: {e}")
+        
+        # Скачиваем файл от Telegram
+        await on_progress("📥 Загрузка файла...")
+        file = await bot.get_file(file_obj.file_id)
+        
+        # Определяем расширение файла
+        file_extension = ""
+        if file_obj.file_name:
+            file_extension = Path(file_obj.file_name).suffix
+        elif file_obj.mime_type:
+            if "mp4" in file_obj.mime_type:
+                file_extension = ".mp4"
+            elif "avi" in file_obj.mime_type:
+                file_extension = ".avi"
+            elif "webm" in file_obj.mime_type:
+                file_extension = ".webm"
+            else:
+                file_extension = ".mp4"  # По умолчанию
+        else:
+            file_extension = ".mp4"
+        
+        # Сохраняем файл
+        video_path = os.path.join(user_temp_dir, f"uploaded_{file_obj.file_unique_id}{file_extension}")
+        await bot.download_file(file.file_path, video_path)
+        
+        # Извлекаем аудио
+        await on_progress("🎵 Извлечение аудио...")
+        audio_path = await extract_audio_ffmpeg(video_path, user_temp_dir)
+        
+        # Проверяем размер аудио файла
+        audio_size = os.path.getsize(audio_path)
+        if audio_size > MAX_FILE_SIZE:
+            await status_msg.edit_text(
+                f"❌ Аудио файл слишком большой ({audio_size // (1024*1024)} МБ). "
+                f"Максимум: {MAX_FILE_SIZE // (1024*1024)} МБ"
+            )
+            return
+        
+        # Отправляем аудио файл
+        await on_progress("📤 Отправка аудио...")
+        
+        # Читаем аудио файл
+        async with aiofiles.open(audio_path, 'rb') as audio_file:
+            audio_data = await audio_file.read()
+        
+        # Формируем имя файла
+        original_name = file_obj.file_name or "video"
+        safe_name = "".join(c for c in original_name if c.isalnum() or c in (' ', '-', '_')).strip()
+        filename = f"{Path(safe_name).stem}.mp3" if safe_name else "audio.mp3"
+        
+        # Отправляем аудио
+        audio_file = BufferedInputFile(audio_data, filename=filename)
+        await message.answer_audio(
+            audio=audio_file,
+            title=Path(original_name).stem,
+            caption=f"🎵 <b>Аудио из {original_name}</b>\n\n📊 Размер: {audio_size // 1024} КБ"
+        )
+        
+        # Удаляем статусное сообщение
+        await status_msg.delete()
+        
+    except AudioError as e:
+        logger.error(f"Audio extraction error: {e}")
+        await status_msg.edit_text(f"❌ Ошибка извлечения аудио:\n{str(e)}")
+    except Exception as e:
+        logger.error(f"Video processing failed: {e}", exc_info=True)
+        await status_msg.edit_text("❌ Произошла ошибка при обработке видео")
+    finally:
+        # Очищаем временные файлы
+        try:
+            import shutil
+            if os.path.exists(user_temp_dir):
+                shutil.rmtree(user_temp_dir)
+        except Exception as e:
+            logger.warning(f"Cleanup failed: {e}")
 
 @dp.message()
-async def default_handler(message: Message) -> None:
-	"""Handle all other messages"""
-	await message.answer(
-		"📹 Отправьте ссылку на видео или загрузите видеофайл напрямую\n\n"
-		"✅ Поддерживаемые источники:\n"
-		"• Прямые ссылки на видео\n"
-		"• YouTube (может быть заблокирован)\n"
-		"• Яндекс.Диск\n"
-		"• Загрузка файлов напрямую в бота\n\n"
-		"❌ Проблемные источники:\n"
-		"• Mail.ru (требует авторизации)\n"
-		"• Rutube (нестабильно)\n\n"
-		"💡 Совет: Для надёжности загружайте видеофайлы напрямую в бота!"
-	)
+async def unknown_handler(message: Message):
+    """Обработчик неизвестных сообщений"""
+    await message.answer(
+        "❓ Я не понимаю это сообщение.\n\n"
+        "Отправь мне:\n"
+        "🔗 Ссылку на видео\n"
+        "📁 Видео файл\n\n"
+        "Или используй /help для получения справки"
+    )
 
-
-async def main() -> None:
-	if not settings.bot_token:
-		raise RuntimeError("BOT_TOKEN is not set")
-	bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-	await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-
+async def main():
+    """Главная функция запуска бота"""
+    # Создаем временную директорию
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    
+    logger.info("Starting Telegram Audio Extractor Bot...")
+    logger.info(f"Temp directory: {TEMP_DIR}")
+    logger.info(f"Max file size: {MAX_FILE_SIZE // (1024*1024)} MB")
+    
+    try:
+        # Запускаем polling
+        await dp.start_polling(bot, skip_updates=True)
+    except Exception as e:
+        logger.error(f"Bot failed: {e}", exc_info=True)
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
-	asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
