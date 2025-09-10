@@ -50,7 +50,8 @@ async def link_handler(message: Message) -> None:
 				progress_last = text
 				# Schedule the coroutine to run in the background
 				loop = asyncio.get_event_loop()
-				loop.create_task(status_msg.edit_text(text))
+				coro = status_msg.edit_text(text)
+				loop.create_task(coro)
 
 		result = await run_extract_audio(
 			video_result.file_path,
@@ -73,6 +74,22 @@ async def link_handler(message: Message) -> None:
 			await status_msg.edit_text("❌ YouTube заблокировал доступ. Попробуйте другой источник или загрузите видео напрямую.")
 		elif "Unsupported URL" in error_msg:
 			await status_msg.edit_text("❌ Неподдерживаемый тип ссылки. Попробуйте прямую ссылку на видео или загрузите файл напрямую.")
+		elif "cloud.mail.ru" in url or "Mail.ru Cloud requires authentication" in error_msg:
+			await status_msg.edit_text(
+				"❌ Mail.ru Cloud требует авторизации.\n\n"
+				"Поддерживаемые платформы:\n"
+				"✅ YouTube (большинство видео)\n"
+				"✅ Yandex Disk публичные ссылки\n"
+				"✅ Прямые ссылки на видео\n"
+				"❌ Mail.ru (требует авторизации)\n"
+				"❌ VK (требует cookies/логин)\n"
+				"❌ Instagram (требует cookies)\n"
+				"❌ TikTok (IP ограничения)\n"
+				"❌ Rutube (нестабильно)\n\n"
+				"Попробуйте загрузить видеофайл напрямую в бота."
+			)
+		elif "rutube" in url:
+			await status_msg.edit_text("❌ Rutube ссылка недоступна. Попробуйте другую ссылку или загрузите видео напрямую.")
 		else:
 			await status_msg.edit_text(f"❌ Ошибка загрузки: {e}")
 		return
@@ -123,7 +140,8 @@ async def video_handler(message: Message, bot: Bot) -> None:
 				progress_last = text
 				# Schedule the coroutine to run in the background
 				loop = asyncio.get_event_loop()
-				loop.create_task(status_msg.edit_text(text))
+				coro = status_msg.edit_text(text)
+				loop.create_task(coro)
 		
 		result = await run_extract_audio(
 			video_path,
@@ -148,6 +166,23 @@ async def video_handler(message: Message, bot: Bot) -> None:
 			if 'video_path' in locals() and video_path.exists():
 				video_path.unlink()
 		await asyncio.sleep(0.1)
+
+
+@dp.message()
+async def default_handler(message: Message) -> None:
+	"""Handle all other messages"""
+	await message.answer(
+		"📹 Отправьте ссылку на видео или загрузите видеофайл напрямую\n\n"
+		"✅ Поддерживаемые источники:\n"
+		"• Прямые ссылки на видео\n"
+		"• YouTube (может быть заблокирован)\n"
+		"• Яндекс.Диск\n"
+		"• Загрузка файлов напрямую в бота\n\n"
+		"❌ Проблемные источники:\n"
+		"• Mail.ru (требует авторизации)\n"
+		"• Rutube (нестабильно)\n\n"
+		"💡 Совет: Для надёжности загружайте видеофайлы напрямую в бота!"
+	)
 
 
 async def main() -> None:

@@ -23,7 +23,7 @@ async def test_download_direct_http(tmp_path: Path, monkeypatch):
 		async def iter_chunked(self, n):
 			yield b"data" * 10
 
-	def fake_get(self, url, timeout=None, params=None):
+	def fake_get(self, url, timeout=None, params=None, headers=None):
 		return FakeResp()
 
 	with patch("aiohttp.ClientSession.get", new=fake_get):

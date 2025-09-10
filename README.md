@@ -54,9 +54,25 @@ PYTHONPATH=. pytest -q
 ```
 
 ## Usage
-- Send a video link (Yandex Disk, Mail.ru, direct links, YouTube, etc.)
+- Send a video link (YouTube, Yandex Disk, direct links, etc.)
 - Or upload a video file directly to the bot
 - Bot will extract audio and send it back as MP3
+
+### Supported Platforms
+✅ **Working:**
+- YouTube (most videos)
+- Yandex Disk public links
+- Direct video file links
+- Direct video file uploads
+
+❌ **Limited/Requires Auth:**
+- Mail.ru (requires authentication - upload files directly instead)
+- VK (requires cookies/login)
+- Instagram (requires cookies)
+- TikTok (IP restrictions)
+- Rutube (unstable)
+
+**Note:** For unsupported platforms, upload the video file directly to the bot instead of sending a link.
 
 ## Notes
 - The bot sends progress updates during download/extraction.

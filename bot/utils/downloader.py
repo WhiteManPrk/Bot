@@ -72,26 +72,39 @@ async def _resolve_yandex_public_direct_url(session: aiohttp.ClientSession, publ
 
 
 async def _resolve_mailru_public_direct_url(session: aiohttp.ClientSession, public_url: str) -> tuple[str, Optional[str]]:
-	params = {"public_key": public_url}
+	"""Resolve Mail.ru public link to direct download URL using page scraping"""
+	import re
+	
+	# Get the page content
 	headers = {
 		"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
 		"Referer": public_url,
 	}
-	async with session.get(MAILRU_PUBLIC_API, params=params, headers=headers) as resp:
+	
+	async with session.get(public_url, headers=headers) as resp:
 		if resp.status != 200:
-			raise DownloadError(f"Mail.ru API error {resp.status}")
-		data = await resp.json()
-		body = data.get("body") or {}
-		href = body.get("href")
-		if not href:
-			raise DownloadError("No href in Mail.ru response")
-		filename = None
-		try:
-			parsed = URL(public_url)
-			filename = _sanitize_filename(parsed.name or "video")
-		except Exception:
-			filename = None
-		return href, filename
+			raise DownloadError(f"Mail.ru page error {resp.status}")
+		
+		page_content = await resp.text()
+		
+		# Search for the dispatcher pattern
+		re_pattern = r'dispatcher.*?weblink_get.*?url":"(.*?)"'
+		match = re.search(re_pattern, page_content)
+		
+		if match:
+			url = match.group(1)
+			# Get XXX and YYYYYYYY from the original link
+			parts = public_url.split('/')[-2:]
+			# Add XXX and YYYYYYYY to the resulting URL
+			direct_url = f'{url}/{parts[0]}/{parts[1]}'
+			
+			# Try to extract filename from page content
+			filename_match = re.search(r'"name":"([^"]+)"', page_content)
+			filename = filename_match.group(1) if filename_match else None
+			
+			return direct_url, filename
+		else:
+			raise DownloadError("Could not find download URL in Mail.ru page")
 
 
 def _is_probably_direct(url: str) -> bool:
@@ -135,10 +148,17 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 				except Exception as e:
 					logger.warning("Yandex direct download failed, will fallback: %s", e)
 
-			# Mail.ru public links require authentication, skip direct API
-			if "cloud.mail.ru/public" in url:
-				logger.info("Mail.ru public link detected, will try yt-dlp")
-				# Skip direct API call as it requires authentication
+        # Try Mail.ru Cloud public link
+        if "cloud.mail.ru/public" in url:
+            try:
+                direct_url, inferred = await _resolve_mailru_public_direct_url(session, url)
+                name = inferred or filename
+                size = await _download_with_aiohttp(session, direct_url, dest, max_size_bytes=max_size_bytes)
+                return DownloadResult(file_path=dest, filename=name, size_bytes=size, source="mailru")
+            except Exception as e:
+                logger.warning("Mail.ru direct download failed, will fallback: %s", e)
+                # Mail.ru requires authentication, so we'll skip yt-dlp fallback
+                raise DownloadError("Mail.ru Cloud requires authentication. Please upload the video file directly to the bot instead.")
 
 			# Fallback: yt-dlp for arbitrary hosts
 		except Exception as e:
@@ -149,7 +169,7 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 	cmd = [
 		"yt-dlp",
 		"-f",
-		"best[height<=720]",
+		"best[height<=720]/best",
 		"-o",
 		str(merged_path),
 		"--no-playlist",
@@ -163,6 +183,10 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
 		"--referer",
 		url,
+		"--extractor-args",
+		"youtube:player_client=web",
+		"--cookies-from-browser",
+		"chrome",
 		url,
 	]
 	process = await asyncio.create_subprocess_exec(
