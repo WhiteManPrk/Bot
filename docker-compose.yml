@@ -1,0 +1,14 @@
+version: "3.8"
+services:
+  bot:
+    build: .
+    image: audio-extractor-bot:latest
+    container_name: audio-extractor-bot
+    env_file:
+      - .env
+    environment:
+      - TEMP_DIR=${TEMP_DIR:-/tmp/telegram-audio-bot}
+      - FFMPEG_PATH=${FFMPEG_PATH:-ffmpeg}
+    volumes:
+      - ${TEMP_DIR:-/tmp/telegram-audio-bot}:${TEMP_DIR:-/tmp/telegram-audio-bot}
+    restart: unless-stopped
