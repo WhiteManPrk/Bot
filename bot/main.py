@@ -13,7 +13,7 @@ from aiogram.types import Message, BufferedInputFile
 import aiofiles
 
 from .utils.downloader import download_video, DownloadError
-from .utils.audio import extract_audio_ffmpeg, DownloadError as AudioError
+from .utils.audio import extract_audio_ffmpeg, AudioError
 from .config import BOT_TOKEN, TEMP_DIR, MAX_FILE_SIZE
 
 # Настройка логирования
