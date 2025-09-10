@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 YANDEX_PUBLIC_API = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
+MAILRU_PUBLIC_API = "https://cloud.mail.ru/api/v2/public/resources/download"
 
 
 def _sanitize_filename(name: str) -> str:
@@ -38,11 +39,6 @@ async def _download_with_aiohttp(session: aiohttp.ClientSession, url: str, dest_
 	async with session.get(url, timeout=aiohttp.ClientTimeout(total=None)) as resp:
 		if resp.status != 200:
 			raise DownloadError(f"HTTP {resp.status} while downloading")
-		cd = resp.headers.get("Content-Disposition", "")
-		filename_match = re.search(r'filename="?([^";]+)"?', cd)
-		if filename_match:
-			# We only use this to set dest filename if dest_path points to a dir
-			pass
 		with dest_path.open("wb") as f:
 			async for chunk in resp.content.iter_chunked(1 << 15):
 				size += len(chunk)
@@ -61,7 +57,29 @@ async def _resolve_yandex_public_direct_url(session: aiohttp.ClientSession, publ
 		href = data.get("href")
 		if not href:
 			raise DownloadError("No href in Yandex response")
-		# Try to infer filename from query params
+		filename = None
+		try:
+			parsed = URL(public_url)
+			filename = _sanitize_filename(parsed.name or "video")
+		except Exception:
+			filename = None
+		return href, filename
+
+
+async def _resolve_mailru_public_direct_url(session: aiohttp.ClientSession, public_url: str) -> tuple[str, Optional[str]]:
+	params = {"public_key": public_url}
+	headers = {
+		"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+		"Referer": public_url,
+	}
+	async with session.get(MAILRU_PUBLIC_API, params=params, headers=headers) as resp:
+		if resp.status != 200:
+			raise DownloadError(f"Mail.ru API error {resp.status}")
+		data = await resp.json()
+		body = data.get("body") or {}
+		href = body.get("href")
+		if not href:
+			raise DownloadError("No href in Mail.ru response")
 		filename = None
 		try:
 			parsed = URL(public_url)
@@ -80,7 +98,8 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 	Download a video from various sources. Preference order:
 	1) Direct HTTP(S) links
 	2) Yandex Disk public links via API
-	3) Fallback: yt-dlp to download bestvideo+bestaudio merged file
+	3) Mail.ru public links via API
+	4) Fallback: yt-dlp to download bestvideo+bestaudio merged file
 	"""
 	temp_dir.mkdir(parents=True, exist_ok=True)
 	max_size_bytes = max_size_mb * 1024 * 1024
@@ -103,9 +122,19 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 					size = await _download_with_aiohttp(session, direct_url, dest, max_size_bytes=max_size_bytes)
 					return DownloadResult(file_path=dest, filename=name, size_bytes=size, source="yandex")
 				except Exception as e:
-					logger.warning("Yandex direct download failed, will fallback to yt-dlp: %s", e)
+					logger.warning("Yandex direct download failed, will fallback: %s", e)
 
-			# Fallback: yt-dlp for arbitrary hosts (and Mail.ru cloud, Google Drive, etc.)
+			# Try Mail.ru Cloud public link
+			if "cloud.mail.ru/public" in url:
+				try:
+					direct_url, inferred = await _resolve_mailru_public_direct_url(session, url)
+					name = inferred or filename
+					size = await _download_with_aiohttp(session, direct_url, dest, max_size_bytes=max_size_bytes)
+					return DownloadResult(file_path=dest, filename=name, size_bytes=size, source="mailru")
+				except Exception as e:
+					logger.warning("Mail.ru direct download failed, will fallback: %s", e)
+
+			# Fallback: yt-dlp for arbitrary hosts
 		except Exception as e:
 			logger.info("Direct methods failed: %s", e)
 
@@ -119,6 +148,15 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 		str(merged_path),
 		"--no-playlist",
 		"--no-progress",
+		"--geo-bypass",
+		"--retry-sleep",
+		"1,3,5",
+		"--retries",
+		"3",
+		"--user-agent",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+		"--referer",
+		url,
 		url,
 	]
 	process = await asyncio.create_subprocess_exec(
