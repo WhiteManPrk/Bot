@@ -150,7 +150,7 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 		"--no-progress",
 		"--geo-bypass",
 		"--retry-sleep",
-		"1,3,5",
+		"1",
 		"--retries",
 		"3",
 		"--user-agent",

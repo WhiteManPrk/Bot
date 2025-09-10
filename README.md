@@ -1,6 +1,6 @@
 # Telegram Audio Extractor Bot
 
-Async Telegram bot that downloads a video from a link (Yandex Disk public links, direct links, others via yt-dlp), extracts its audio using ffmpeg, and returns the audio file to the user.
+Async Telegram bot that downloads a video from a link (Yandex Disk public links, direct links, others via yt-dlp) or processes uploaded video files, extracts their audio using ffmpeg, and returns the audio file to the user.
 
 ## Requirements
 - Docker (or local Python 3.11+ with ffmpeg and yt-dlp)
@@ -53,7 +53,22 @@ PYTHONPATH=. python -m bot.main
 PYTHONPATH=. pytest -q
 ```
 
+## Usage
+- Send a video link (Yandex Disk, Mail.ru, direct links, YouTube, etc.)
+- Or upload a video file directly to the bot
+- Bot will extract audio and send it back as MP3
+
 ## Notes
 - The bot sends progress updates during download/extraction.
 - Yandex public links are resolved via Cloud API; if that fails, bot falls back to yt-dlp.
+- Mail.ru public links are resolved via their API.
+- For other platforms (YouTube, VK, etc.), yt-dlp handles authentication automatically.
 - Temporary files are stored under `TEMP_DIR` and cleaned after processing.
+
+## yt-dlp Tokens
+yt-dlp automatically handles authentication for most platforms:
+- **YouTube**: No tokens needed for public videos
+- **VK**: Uses cookies from browser (automatic)
+- **Instagram**: Uses session cookies (automatic)
+- **TikTok**: Uses device tokens (automatic)
+- **Private videos**: May require cookies or tokens (see yt-dlp docs)
