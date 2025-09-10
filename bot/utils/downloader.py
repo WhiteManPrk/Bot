@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +37,11 @@ class DownloadError(Exception):
 
 async def _download_with_aiohttp(session: aiohttp.ClientSession, url: str, dest_path: Path, *, max_size_bytes: int) -> int:
 	size = 0
-	async with session.get(url, timeout=aiohttp.ClientTimeout(total=None)) as resp:
+	headers = {
+		"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+		"Referer": url,
+	}
+	async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=None)) as resp:
 		if resp.status != 200:
 			raise DownloadError(f"HTTP {resp.status} while downloading")
 		with dest_path.open("wb") as f:
@@ -108,7 +113,13 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 	os.close(fd)
 	dest = Path(tmp_path)
 
-	async with aiohttp.ClientSession() as session:
+	# Create SSL context that doesn't verify certificates for problematic sites
+	ssl_context = ssl.create_default_context()
+	ssl_context.check_hostname = False
+	ssl_context.verify_mode = ssl.CERT_NONE
+	
+	connector = aiohttp.TCPConnector(ssl=ssl_context)
+	async with aiohttp.ClientSession(connector=connector) as session:
 		try:
 			if _is_probably_direct(url):
 				size = await _download_with_aiohttp(session, url, dest, max_size_bytes=max_size_bytes)
@@ -124,15 +135,10 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 				except Exception as e:
 					logger.warning("Yandex direct download failed, will fallback: %s", e)
 
-			# Try Mail.ru Cloud public link
+			# Mail.ru public links require authentication, skip direct API
 			if "cloud.mail.ru/public" in url:
-				try:
-					direct_url, inferred = await _resolve_mailru_public_direct_url(session, url)
-					name = inferred or filename
-					size = await _download_with_aiohttp(session, direct_url, dest, max_size_bytes=max_size_bytes)
-					return DownloadResult(file_path=dest, filename=name, size_bytes=size, source="mailru")
-				except Exception as e:
-					logger.warning("Mail.ru direct download failed, will fallback: %s", e)
+				logger.info("Mail.ru public link detected, will try yt-dlp")
+				# Skip direct API call as it requires authentication
 
 			# Fallback: yt-dlp for arbitrary hosts
 		except Exception as e:
@@ -143,7 +149,7 @@ async def download_video(url: str, *, temp_dir: Path, max_size_mb: int, yadisk_t
 	cmd = [
 		"yt-dlp",
 		"-f",
-		"bv*+ba/b",
+		"best[height<=720]",
 		"-o",
 		str(merged_path),
 		"--no-playlist",

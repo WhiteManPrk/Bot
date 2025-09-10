@@ -48,7 +48,9 @@ async def link_handler(message: Message) -> None:
 			text = "🎵 Обработка аудио..." if stage == "processing" else "✅ Завершаю..."
 			if text != progress_last:
 				progress_last = text
-				asyncio.create_task(status_msg.edit_text(text))
+				# Schedule the coroutine to run in the background
+				loop = asyncio.get_event_loop()
+				loop.create_task(status_msg.edit_text(text))
 
 		result = await run_extract_audio(
 			video_result.file_path,
@@ -66,7 +68,13 @@ async def link_handler(message: Message) -> None:
 
 	except DownloadError as e:
 		logger.exception("Download failed")
-		await status_msg.edit_text(f"❌ Ошибка загрузки: {e}")
+		error_msg = str(e)
+		if "Sign in to confirm you're not a bot" in error_msg:
+			await status_msg.edit_text("❌ YouTube заблокировал доступ. Попробуйте другой источник или загрузите видео напрямую.")
+		elif "Unsupported URL" in error_msg:
+			await status_msg.edit_text("❌ Неподдерживаемый тип ссылки. Попробуйте прямую ссылку на видео или загрузите файл напрямую.")
+		else:
+			await status_msg.edit_text(f"❌ Ошибка загрузки: {e}")
 		return
 	except ExtractionError as e:
 		logger.exception("Extraction failed")
@@ -113,7 +121,9 @@ async def video_handler(message: Message, bot: Bot) -> None:
 			text = "🎵 Обработка аудио..." if stage == "processing" else "✅ Завершаю..."
 			if text != progress_last:
 				progress_last = text
-				asyncio.create_task(status_msg.edit_text(text))
+				# Schedule the coroutine to run in the background
+				loop = asyncio.get_event_loop()
+				loop.create_task(status_msg.edit_text(text))
 		
 		result = await run_extract_audio(
 			video_path,
