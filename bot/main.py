@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Message, FSInputFile
+from aiogram.client.default import DefaultBotProperties
 
 from .config import get_settings
 from .utils.audio import run_extract_audio, ExtractionError
@@ -86,7 +87,7 @@ async def link_handler(message: Message) -> None:
 async def main() -> None:
 	if not settings.bot_token:
 		raise RuntimeError("BOT_TOKEN is not set")
-	bot = Bot(token=settings.bot_token, parse_mode=ParseMode.HTML)
+	bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 	await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
